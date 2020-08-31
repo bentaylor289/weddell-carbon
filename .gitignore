@@ -1,0 +1,5 @@
+# writing a gitignore from scratch which may be a problem. We'll see...
+
+*.nc
+*.mat
+/Iter130 
