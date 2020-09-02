@@ -15,6 +15,7 @@ wkend = 1; % 438 is the final week (6 years, 73 5-day periods in a year)
 fold5day = '../../../data/bSOSE/iter133NEW/5day/bsose_i133_2013to2018_5day_';
 fold1dy = '../../../data/bSOSE/iter133NEW/1day/bsose_i133_2013to2018_1dy_';
 fold5daySnaps = '../../../data/bSOSE/iter133NEW/5day/bsose_i133_2013to2018_5daySnaps_';
+fold5daySnapShots = '../../../data/bSOSE/iter133NEW/5day/bsose_i133_2013to2018_5daySnapShots_';
 % Other dependencies: cellwise budget folder (iter133/cellwise5day/), grid file. 
 
 Nlat = 60; % S is assumed, so enter positive latitudes
@@ -26,7 +27,7 @@ ycSW = 75; % to avoid reading data from areas of land, you can set the point whe
 ycSE = 75; % not necessary - can set 78 (or higher value) as a default and the code should run fine.  
 
 % Using the sea ice budget adds significant error to the budget
-% Not using the budget assumes that sea ice production/melt within the region is exactly balanced by export and change in total sea ice mass; that is, only the data for sea ice production/melt is used.  
+% Not using the budget assumes that sea ice production/melt within the region is exactly balanced by export and change in total sea ice mass; that is, data for sea ice production/melt is combined with residual (i.e. not explicitlyused).  
 UseSeaIceBudget = true; 
 
 % code for calculating horizontal and overturning is commented out, but is easily included. 
@@ -298,33 +299,63 @@ resSI(l) = heffSI(l) + meltSI(l) + expSI(l);
    %VHtot(t,:) = VH_i;
    %Ntot(t,:) = N_i;
    %OVRtot(t,:) = VH_i .* N_i;
-   
+
+%% directly evaluate change in surface content  
+
+etaSn = squeeze(ncread(strcat(fold5daySnaps, 'SSH.nc'), 'ETAN', [1 1 t_real], [Inf yc-1 2])); 
+DICsur = squeeze(ncread(strcat(fold5day, 'DIC.nc'), 'TRAC01', [1 1 1 t_real],[Inf yc-1 1 1]));
+
+partetaC(l) = 1/(120*3600)* sum(sum(squeeze(diff(etaSn(xcFull, :,:),1,3)).*sur(xcFull, 1:yc-1, 1).*DICsur(xcFull,:,1))); % d(eta)/dt * area * average DIC concentration gives change in surface carbon content, exactly.
 
 end 
 
 %% Now we combine these to form our content budget. 
+% I'll refer to the Carbon Inventory Budget Latex here to connect code to equations there. 
+% for now the units are mol/s
 
-eps_damp = resVol; 
-eps_vol = % 
+eps_damp = resVol; % equation 24 (volume budget). 
+eps_vol = partetaC - corrTot + dilutTot - resVol.*phi0; % equation 26
+eps_SI = resSI; % equation 28
+v_cons_adv = advTot - phi0.*advVol; % volume conserved advection, which appears in equation 29 as the difference between total advection and phi0*v0*A_c. 
+% we could also evaluate this using NVHtot - VOLtot, or by creating a volume-conserved velocity field. 
+% (See GeneralBoxHorizontal.m code) These are equal up to the sub5day residual
 
-storage = tendTot + partetaCSm - SSHVol.*phi0 - heffSI.*phi0;
-PER = FWVol - meltSI; % equivalent to total FW2. 
+storage = tendTot + partetaC - SSHVol.*phi0 - heffSI.*phi0; % equation 29, LHS (not including residuals)
+% SSHVol.*phi0 is the d(eta)/dt * phi_0
 
+if (UseSeaIceBudget) % proceed as in the LaTeX, without hiding the residual
+PER = FWVol - meltSI; % equivalent to total FW2. Appears in equation 29, multipled by phi0 as freshwater outflow term
+
+resExtra = storage - eps_vol - eps_SI.*phi0 - surfTot - bioTot -(v_cons_adv) - expSI.*phi0 + PER.*phi0 - mixTot- resBox;
+% from equation 29, the extra residual not attributable to the carbon concentration, volume, or sea ice budgets   
+resTotal = eps_vol + eps_SI.*phi0 + resBox + resExtra;
+end 
+
+if (~UseSeaIceBudget) % let's assume that sea ice export and height change are well captured, and the residual has to do with precipitation (i.e. let's include the eps_SI in meltSI).
+meltSI = meltSI - resSI; % include the residual in meltSI, so that now meltSI + expSI + heffSI = 0	
+PER = FWVol - meltSI; % no longer equivalent to FW2. 
+
+% I suspect there's a sign backwards here
+resExtra = storage - eps_vol - surfTot - bioTot -(v_cons_adv) - expSI.*phi0 + PER.*phi0 - mixTot- resBox;
+% from equation 29, the extra residual not attributable to the carbon concentration, volume, or sea ice budgets   
+resTotal = eps_vol  + resBox + resExtra;
+end 
 
 % At the end, convert everything into more familiar units! 
 cv = 3.7843e-4; % units of Tg/yr, instead of mol/s . 
-tendTot = tendTot * cv; 
+storage = storage * cv; 
 resBox = resBox *cv;
-advTot =  advTot*cv;
+resTotal = resTotal*cv;
+resExtra = resExtra*cv;
 surfTot = surfTot*cv;
 bioTot = bioTot*cv;
-corrTot = corrTot*cv;
+v_cons_adv = v_cons_adv*cv;
 mixTot = mixTot*cv;
-resCell = resCell*cv;
-%dilutTot = dilutTot*cv;
+eps_vol = eps_vol*cv;
+% to compare eps_SI with the other residuals, multiply by phi0 (and by cv as needed)
+
+FW_driven_export = phi0.*PER*cv; 
+SI_driven_import = phi0.*expSI*cv;
 
 
-
-
-%%
-save('BoxbudgetWk'+string(monstart)+'to'+string(monend)+'.mat', 'Nlat', 'lonE','lonW','resCell', 'tendTot', 'dilutTot', 'advTot', 'corrTot', 'surfTot','bioTot', 'mixTot','resTot');
+save('GContentBudgetWk'+string(monstart)+'to'+string(monend)+'.mat', 'Nlat', 'lonE','lonW','resTotal','resExtra','FW_driven_export','SI_driven_import','storage','v_cons_adv', 'tendTot', 'dilutTot', 'advTot', 'corrTot', 'surfTot','bioTot', 'mixTot','resBox');
